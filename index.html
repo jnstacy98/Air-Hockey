@@ -42,6 +42,7 @@
     padding-right: max(16px, env(safe-area-inset-right, 0px));
     background: color-mix(in srgb, var(--frame) 78%, transparent);
     backdrop-filter: blur(3px);
+    overflow-y: auto;
     z-index: 5;
   }
   .card {
@@ -71,7 +72,7 @@
     margin-bottom: 8px;
   }
   .seg { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
-  .seg button, .go {
+  .seg button, .go, .ghost {
     font-family: var(--body); font-weight: 700; font-size: 20px;
     border-radius: 999px; cursor: pointer;
     padding: 10px 18px;
@@ -84,8 +85,24 @@
     background: var(--p1); border-color: var(--p1); color: var(--ink);
     padding: 14px 18px;
   }
-  button:focus-visible { outline: 3px solid var(--p2); outline-offset: 3px; }
+  .go:disabled { opacity: .45; cursor: default; }
+  button:focus-visible, input:focus-visible { outline: 3px solid var(--p2); outline-offset: 3px; }
   .how { margin: 0; font-size: 16px; line-height: 1.4; color: color-mix(in srgb, var(--ice) 70%, var(--frame)); }
+  .online { display: grid; gap: 12px; }
+  .joinRow { display: flex; gap: 8px; justify-content: center; }
+  #codeInput {
+    width: 7ch; text-align: center;
+    font: 400 26px var(--display); letter-spacing: .12em; text-transform: uppercase;
+    background: var(--ice); color: var(--ink);
+    border: 2px solid var(--ice); border-radius: 12px; padding: 6px 8px;
+  }
+  .code {
+    font: 400 52px var(--display); letter-spacing: .14em; color: var(--p1);
+    line-height: 1;
+  }
+  .status { margin: 0; font-size: 18px; font-weight: 700; }
+  .status.ok { color: #7fd99a; }
+  .status.err { color: #ff8a8a; }
   .pause {
     position: fixed; z-index: 4;
     top: calc(10px + env(safe-area-inset-top, 0px));
@@ -95,7 +112,6 @@
     font: 700 18px var(--body); cursor: pointer;
   }
 </style>
-
 </head>
 <body>
 <canvas id="game" aria-label="Air hockey table"></canvas>
@@ -103,16 +119,34 @@
 
 <div class="overlay" id="menu">
   <div class="card">
-    <h1><span class="a">Rinkside</span><br><span class="b">Air Hockey</span></h1>
-    <p class="sub" id="menuSub">Lay the phone or tablet flat between you. Each player drags the paddle on their end.</p>
-    <div>
+    <h1 id="menuTitle"><span class="a">Rinkside</span><br><span class="b">Air Hockey</span></h1>
+    <p class="sub" id="menuSub">Play on one device laid flat between you, or online with each of you on your own device.</p>
+    <div id="modeBox">
       <div class="label">Players</div>
       <div class="seg" id="modeSeg">
-        <button type="button" data-mode="2p" aria-pressed="true">2 players</button>
+        <button type="button" data-mode="2p" aria-pressed="true">Same device</button>
+        <button type="button" data-mode="online" aria-pressed="false">Online</button>
         <button type="button" data-mode="cpu" aria-pressed="false">vs Computer</button>
       </div>
     </div>
-    <div>
+
+    <div class="online" id="onlinePanel" hidden>
+      <div class="seg" id="roleSeg">
+        <button type="button" id="hostBtn" aria-pressed="false">Host a game</button>
+        <button type="button" id="joinBtn" aria-pressed="false">Join a game</button>
+      </div>
+      <div id="codeBox" hidden>
+        <div class="label">Your game code</div>
+        <div class="code" id="codeShow">····</div>
+      </div>
+      <div class="joinRow" id="joinRow" hidden>
+        <input id="codeInput" maxlength="4" placeholder="CODE" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Game code">
+        <button type="button" class="ghost" id="joinGo">Join</button>
+      </div>
+      <p class="status" id="netStatus" aria-live="polite"></p>
+    </div>
+
+    <div id="targetBox">
       <div class="label">First to</div>
       <div class="seg" id="targetSeg">
         <button type="button" data-t="5" aria-pressed="false">5</button>
@@ -121,23 +155,29 @@
       </div>
     </div>
     <button class="go" id="startBtn" type="button">Face off</button>
-    <p class="how">Keyboard works too: orange uses the arrow keys, blue uses W A S D.</p>
+    <p class="how" id="howText">Keyboard works too: orange uses the arrow keys, blue uses W A S D.</p>
   </div>
 </div>
 
+<script src="peerjs.min.js"></script>
 <script>
 (() => {
   const TW = 1000, TL = 1600;            // table width (short side) and length (long side)
   const PR = 34, MR = 62;                 // puck radius, mallet radius
   const GOAL0 = 330, GOAL1 = 670;         // goal mouth x-range
   const MAXV = 2800;
+  const PEER_PREFIX = 'rinkside-airhockey-';
+  const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
-  const canvas = document.getElementById('game');
-  const ctx = canvas.getContext('2d');
-  const menu = document.getElementById('menu');
-  const menuSub = document.getElementById('menuSub');
-  const startBtn = document.getElementById('startBtn');
-  const pauseBtn = document.getElementById('pauseBtn');
+  const $ = id => document.getElementById(id);
+  const canvas = $('game'), ctx = canvas.getContext('2d');
+  const menu = $('menu'), menuTitle = $('menuTitle'), menuSub = $('menuSub');
+  const startBtn = $('startBtn'), pauseBtn = $('pauseBtn');
+  const onlinePanel = $('onlinePanel'), netStatus = $('netStatus');
+  const hostBtn = $('hostBtn'), joinBtn = $('joinBtn');
+  const codeBox = $('codeBox'), codeShow = $('codeShow');
+  const joinRow = $('joinRow'), codeInput = $('codeInput'), joinGo = $('joinGo');
+  const targetBox = $('targetBox'), howText = $('howText'), modeBox = $('modeBox');
 
   const css = getComputedStyle(document.documentElement);
   const C = k => css.getPropertyValue(k).trim();
@@ -147,6 +187,13 @@
   let running = false, paused = false;
   let score = [0, 0];                     // [orange (bottom), blue (top)]
   let message = '', messageT = 0, serveT = 0, serveTo = 0;
+
+  // online state
+  const net = { role: null, peer: null, conn: null, connected: false, code: '' };
+  const isGuest = () => mode === 'online' && net.role === 'guest';
+  const isHost = () => mode === 'online' && net.role === 'host';
+  const me = () => (isGuest() ? 1 : 0);   // which mallet this device controls in online play
+  const flipped = () => isGuest();        // guest sees the table turned so blue is at the bottom
 
   const puck = { x: TW / 2, y: TL / 2, vx: 0, vy: 0 };
   const mallets = [
@@ -168,23 +215,33 @@
     view = { s, land, dpr, w, h, ox: (w - tablePxW) / 2, oy: (h - tablePxH) / 2 };
   }
   function applyTransform() {
-    const { s, ox, oy, land, dpr } = view;
-    if (!land) ctx.setTransform(s * dpr, 0, 0, s * dpr, ox * dpr, oy * dpr);
-    else ctx.setTransform(0, -s * dpr, s * dpr, 0, ox * dpr, (oy + TW * s) * dpr);
+    const { s, ox, oy, land, dpr } = view, k = s * dpr, f = flipped();
+    if (!land) {
+      if (!f) ctx.setTransform(k, 0, 0, k, ox * dpr, oy * dpr);
+      else ctx.setTransform(-k, 0, 0, -k, (ox + TW * s) * dpr, (oy + TL * s) * dpr);
+    } else {
+      if (!f) ctx.setTransform(0, -k, k, 0, ox * dpr, (oy + TW * s) * dpr);
+      else ctx.setTransform(0, k, -k, 0, (ox + TL * s) * dpr, oy * dpr);
+    }
   }
   function toTable(cx, cy) {
-    const { s, ox, oy, land } = view;
-    if (!land) return { x: (cx - ox) / s, y: (cy - oy) / s };
-    return { x: TW - (cy - oy) / s, y: (cx - ox) / s };
+    const { s, ox, oy, land } = view, f = flipped();
+    const u = (cx - ox) / s, v = (cy - oy) / s;
+    if (!land) return f ? { x: TW - u, y: TL - v } : { x: u, y: v };
+    return f ? { x: v, y: TL - u } : { x: TW - v, y: u };
   }
 
   // ---------- input ----------
   const touchOwner = new Map();           // pointerId -> mallet index
+  function ownerFor(p) {
+    if (mode === 'online') return me();   // on your own device every touch moves your paddle
+    if (mode === 'cpu') return 0;
+    return p.y > TL / 2 ? 0 : 1;
+  }
   canvas.addEventListener('pointerdown', e => {
     audioInit();
     const p = toTable(e.clientX, e.clientY);
-    let idx = p.y > TL / 2 ? 0 : 1;
-    if (mode === 'cpu' && idx === 1) idx = 0;
+    const idx = ownerFor(p);
     touchOwner.set(e.pointerId, idx);
     try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
     setTarget(idx, p);
@@ -192,8 +249,9 @@
   });
   canvas.addEventListener('pointermove', e => {
     if (e.pointerType === 'mouse' && !touchOwner.has(e.pointerId)) {
-      // desktop: mouse steers orange without clicking
-      setTarget(0, toTable(e.clientX, e.clientY)); return;
+      // desktop: the mouse steers this device's paddle without clicking
+      const p = toTable(e.clientX, e.clientY);
+      setTarget(mode === 'online' ? me() : 0, p); return;
     }
     if (!touchOwner.has(e.pointerId)) return;
     setTarget(touchOwner.get(e.pointerId), toTable(e.clientX, e.clientY));
@@ -207,25 +265,40 @@
 
   const keys = new Set();
   window.addEventListener('keydown', e => {
+    if (e.target === codeInput) return;
     if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
     keys.add(e.key.toLowerCase());
     if (e.key === 'Escape' || e.key.toLowerCase() === 'p') togglePause();
   });
   window.addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+  window.addEventListener('blur', () => keys.clear());
 
+  const ARROWS = ['arrowleft','arrowright','arrowup','arrowdown'], WASD = ['a','d','w','s'];
   function keyDir(i) {
-    const k = i === 0 ? ['arrowleft','arrowright','arrowup','arrowdown'] : ['a','d','w','s'];
-    let dx = (keys.has(k[1]) ? 1 : 0) - (keys.has(k[0]) ? 1 : 0);
-    let dy = (keys.has(k[3]) ? 1 : 0) - (keys.has(k[2]) ? 1 : 0);
-    // Keys follow the screen: in landscape the table is turned, so convert screen directions to table directions.
-    if (view.land) return [-dy, dx];
-    return [dx, dy];
+    let sets;
+    if (mode === 'online' || mode === 'cpu') sets = i === me() ? [ARROWS, WASD] : [];
+    else sets = [i === 0 ? ARROWS : WASD];
+    let dx = 0, dy = 0;
+    for (const k of sets) {
+      dx += (keys.has(k[1]) ? 1 : 0) - (keys.has(k[0]) ? 1 : 0);
+      dy += (keys.has(k[3]) ? 1 : 0) - (keys.has(k[2]) ? 1 : 0);
+    }
+    dx = Math.sign(dx); dy = Math.sign(dy);
+    // Keys follow the screen; convert screen directions to table directions.
+    const f = flipped();
+    if (view.land) return f ? [dy, -dx] : [-dy, dx];
+    return f ? [-dx, -dy] : [dx, dy];
   }
 
   // ---------- audio ----------
   let actx = null;
-  function audioInit() { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} } }
-  function blip(freq, dur, vol = 0.15, type = 'triangle') {
+  let sfxOut = [];                        // sounds the host forwards to the guest
+  function audioInit() {
+    if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} }
+    else if (actx.state === 'suspended') actx.resume();
+  }
+  function blip(freq, dur, vol = 0.15, type = 'triangle', fromNet = false) {
+    if (!fromNet && isHost() && net.connected) sfxOut.push([freq, dur, vol, type]);
     if (!actx) return;
     const t = actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
     o.type = type; o.frequency.setValueAtTime(freq, t);
@@ -249,13 +322,33 @@
     puck.y = serveSide === 0 ? TL * 0.68 : serveSide === 1 ? TL * 0.32 : TL / 2;
   }
 
+  function nameOf(i) {
+    if (i === 1 && mode === 'cpu') return 'Computer';
+    return i === 0 ? 'Orange' : 'Blue';
+  }
+
+  function hideMenu() { menu.hidden = true; pauseBtn.hidden = false; }
+  function showMenu() { menu.hidden = false; pauseBtn.hidden = true; }
+
   function startGame() {
     score = [0, 0];
     resetPositions(Math.random() < 0.5 ? 0 : 1);
     running = true; paused = false;
-    menu.hidden = true; pauseBtn.hidden = false;
+    hideMenu();
     message = 'Go!'; messageT = 0.9; serveT = 0;
     audioInit(); blip(660, 0.15);
+    if (isHost()) send({ t: 'start', target });
+  }
+
+  function showGameOver(winner) {
+    const mine = mode === 'online' && winner === me();
+    const title = mode === 'online' ? (mine ? 'You win!' : `${nameOf(winner)} wins!`) : `${nameOf(winner)} wins!`;
+    menuTitle.innerHTML = `<span class="${winner === 0 ? 'a' : 'b'}">${title}</span>`;
+    menuSub.textContent = `Final score: Orange ${score[0]}, ${nameOf(1)} ${score[1]}. Ready for a rematch?`;
+    startBtn.textContent = 'Rematch';
+    startBtn.disabled = false;
+    setMenuLayout('over');
+    showMenu();
   }
 
   function goal(scorer) {
@@ -263,17 +356,10 @@
     blip(880, 0.12, 0.2, 'square'); setTimeout(() => blip(1320, 0.25, 0.2, 'square'), 120);
     if (score[scorer] >= target) {
       running = false;
-      const name = scorer === 0 ? 'Orange' : (mode === 'cpu' ? 'Computer' : 'Blue');
-      setTimeout(() => {
-        menu.querySelector('h1').innerHTML = scorer === 0
-          ? '<span class="a">Orange wins!</span>'
-          : `<span class="b">${name} wins!</span>`;
-        menuSub.textContent = `Final score ${score[0]} – ${score[1]}. Ready for a rematch?`;
-        startBtn.textContent = 'Rematch';
-        menu.hidden = false; pauseBtn.hidden = true;
-      }, 900);
       message = 'Game!'; messageT = 2;
       puck.vx = puck.vy = 0; puck.y = -999;
+      if (isHost()) { sendState(); send({ t: 'over', w: scorer, sc: score }); }
+      setTimeout(() => showGameOver(scorer), 900);
       return;
     }
     message = 'Goal!'; messageT = 1.1;
@@ -282,40 +368,232 @@
     puck.vx = puck.vy = 0; puck.y = -999;
   }
 
-  function togglePause() {
-    if (!running) return;
-    paused = !paused;
+  function setPaused(v, fromNet = false) {
+    if (!running || paused === v) return;
+    paused = v;
+    if (!fromNet && mode === 'online') send({ t: 'pause', v });
     if (paused) {
-      menu.querySelector('h1').innerHTML = '<span class="a">Paused</span>';
-      menuSub.textContent = `Orange ${score[0]} – ${score[1]} ${mode === 'cpu' ? 'Computer' : 'Blue'}`;
+      menuTitle.innerHTML = '<span class="a">Paused</span>';
+      menuSub.textContent = `Orange ${score[0]}, ${nameOf(1)} ${score[1]}`;
       startBtn.textContent = 'Resume';
-      menu.hidden = false;
-    } else menu.hidden = true;
+      startBtn.disabled = false;
+      setMenuLayout('paused');
+      showMenu();
+    } else hideMenu();
   }
+  function togglePause() { setPaused(!paused); }
   pauseBtn.addEventListener('click', togglePause);
 
   startBtn.addEventListener('click', () => {
-    if (paused) { paused = false; menu.hidden = true; return; }
+    audioInit();
+    if (paused) { setPaused(false); return; }
+    if (isGuest()) {
+      // the host runs the game; ask it to start a rematch
+      send({ t: 'again' });
+      startBtn.disabled = true;
+      menuSub.textContent = 'Asked for a rematch. Starting…';
+      return;
+    }
+    if (mode === 'online' && !net.connected) return;
     startGame();
   });
+
   function wireSeg(id, attr, set) {
-    const seg = document.getElementById(id);
+    const seg = $(id);
     seg.addEventListener('click', e => {
       const b = e.target.closest('button'); if (!b) return;
       seg.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
       set(b.dataset[attr]);
-      if (paused) { paused = false; running = false; startBtn.textContent = 'Face off'; }
     });
   }
-  wireSeg('modeSeg', 'mode', v => mode = v);
+  wireSeg('modeSeg', 'mode', v => {
+    if (v !== mode) { leaveOnline(); running = false; paused = false; }
+    mode = v; setMenuLayout('setup');
+  });
   wireSeg('targetSeg', 't', v => target = +v);
+
+  // Which parts of the menu card show, depending on mode and moment.
+  function setMenuLayout(moment) {
+    const online = mode === 'online';
+    modeBox.hidden = moment === 'paused' || (online && net.connected);
+    onlinePanel.hidden = !online || moment !== 'setup';
+    targetBox.hidden = moment === 'paused' || (online && net.role === 'guest');
+    if (moment === 'setup') {
+      menuTitle.innerHTML = '<span class="a">Rinkside</span><br><span class="b">Air Hockey</span>';
+      startBtn.textContent = 'Face off';
+      if (online) {
+        menuSub.textContent = 'Each of you opens this page on your own device. One person hosts, the other joins with the code.';
+        howText.textContent = 'Your paddle is always at the bottom of your screen. Drag anywhere to move it.';
+        startBtn.hidden = net.role === 'guest';
+        startBtn.disabled = !net.connected;
+      } else {
+        menuSub.textContent = mode === 'cpu'
+          ? 'Play orange against the computer. Drag anywhere on the table to move your paddle.'
+          : 'Lay the phone or tablet flat between you. Each player drags the paddle on their end.';
+        howText.textContent = mode === 'cpu'
+          ? 'Keyboard works too: arrow keys or W A S D.'
+          : 'Keyboard works too: orange uses the arrow keys, blue uses W A S D.';
+        startBtn.hidden = false; startBtn.disabled = false;
+      }
+    } else {
+      startBtn.hidden = false;
+    }
+  }
+
+  // ---------- online play ----------
+  function setStatus(text, kind = '') { netStatus.textContent = text; netStatus.className = 'status' + (kind ? ' ' + kind : ''); }
+  function send(msg) { if (net.conn && net.connected) { try { net.conn.send(msg); } catch (_) {} } }
+  function makeCode() { let c = ''; for (let i = 0; i < 4; i++) c += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)]; return c; }
+  function peerOptions() {
+    // ?peer=host:port points at a different signaling server (used for local testing)
+    const q = new URLSearchParams(location.search).get('peer');
+    if (!q) return { debug: 0 };
+    const [host, port] = q.split(':');
+    return { host, port: +port || 9000, path: '/', secure: location.protocol === 'https:', debug: 0 };
+  }
+
+  function leaveOnline() {
+    const conn = net.conn, peer = net.peer;
+    net.role = null; net.peer = null; net.conn = null; net.connected = false; net.code = '';
+    if (conn) { try { conn.close(); } catch (_) {} }
+    if (peer) { try { peer.destroy(); } catch (_) {} }
+    hostBtn.setAttribute('aria-pressed', 'false'); joinBtn.setAttribute('aria-pressed', 'false');
+    codeBox.hidden = true; joinRow.hidden = true; setStatus('');
+  }
+
+  function attachConn(conn) {
+    net.conn = conn;
+    conn.on('open', () => {
+      if (net.conn !== conn) return;
+      net.connected = true;
+      if (net.role === 'host') {
+        setStatus('Blue joined. Pick a score and press Face off.', 'ok');
+      } else {
+        setStatus('Connected! Waiting for orange to start the game.', 'ok');
+      }
+      setMenuLayout('setup');
+      if (net.role === 'guest') menuSub.textContent = 'You are blue. Your paddle is at the bottom of your screen.';
+      blip(660, 0.12);
+    });
+    conn.on('data', m => { if (net.conn === conn) onNetData(m); });
+    conn.on('close', () => { if (net.conn === conn) connectionLost(); });
+    conn.on('error', () => { if (net.conn === conn) connectionLost(); });
+  }
+
+  function connectionLost() {
+    const role = net.role;
+    net.connected = false; net.conn = null;
+    running = false; paused = false;
+    setMenuLayout('setup');
+    menuTitle.innerHTML = '<span class="a">Disconnected</span>';
+    menuSub.textContent = 'The other device left or lost its connection.';
+    if (role === 'host' && net.peer && !net.peer.destroyed) {
+      setStatus(`Still hosting. Ask them to join again with code ${net.code}.`, 'err');
+    } else {
+      setStatus('Tap Join to reconnect.', 'err');
+    }
+    showMenu();
+  }
+
+  hostBtn.addEventListener('click', () => {
+    audioInit();
+    leaveOnline();
+    net.role = 'host';
+    hostBtn.setAttribute('aria-pressed', 'true');
+    codeBox.hidden = false; codeShow.textContent = '····';
+    setMenuLayout('setup');
+    setStatus('Getting a code…');
+    const tryHost = (attempt) => {
+      const code = makeCode();
+      const peer = new Peer(PEER_PREFIX + code, peerOptions());
+      net.peer = peer;
+      peer.on('open', () => {
+        if (net.peer !== peer) return;
+        net.code = code; codeShow.textContent = code;
+        setStatus('Waiting for the other player to join…');
+      });
+      peer.on('connection', conn => {
+        if (net.peer !== peer) return;
+        if (net.conn && net.connected) { conn.on('open', () => conn.close()); return; }
+        attachConn(conn);
+      });
+      peer.on('error', err => {
+        if (net.peer !== peer) return;
+        if (err.type === 'unavailable-id' && attempt < 5) { peer.destroy(); tryHost(attempt + 1); return; }
+        if (net.connected) return;
+        setStatus(netError(err), 'err');
+      });
+    };
+    tryHost(0);
+  });
+
+  joinBtn.addEventListener('click', () => {
+    audioInit();
+    leaveOnline();
+    net.role = 'guest';
+    joinBtn.setAttribute('aria-pressed', 'true');
+    joinRow.hidden = false;
+    setMenuLayout('setup');
+    setStatus('Type the code shown on the other screen.');
+    setTimeout(() => codeInput.focus(), 50);
+  });
+
+  function doJoin() {
+    audioInit();
+    const code = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (code.length !== 4) { setStatus('Codes are 4 letters or numbers.', 'err'); return; }
+    const old = net.peer;
+    net.peer = null; net.connected = false; net.conn = null;
+    if (old) { try { old.destroy(); } catch (_) {} }
+    setStatus('Connecting…');
+    const peer = new Peer(peerOptions());
+    net.peer = peer;
+    peer.on('open', () => {
+      if (net.peer !== peer) return;
+      attachConn(peer.connect(PEER_PREFIX + code, { reliable: true, serialization: 'json' }));
+    });
+    peer.on('error', err => { if (net.peer === peer && !net.connected) setStatus(netError(err), 'err'); });
+  }
+  joinGo.addEventListener('click', doJoin);
+  codeInput.addEventListener('keydown', e => { if (e.key === 'Enter') doJoin(); });
+  codeInput.addEventListener('input', () => { codeInput.value = codeInput.value.toUpperCase(); });
+
+  function netError(err) {
+    if (err.type === 'peer-unavailable') return 'No game with that code. Check the code and try again.';
+    if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') return 'Could not reach the matchmaking server. Check your internet and try again.';
+    if (err.type === 'browser-incompatible') return 'This browser can’t play online. Try Safari or Chrome.';
+    return 'Connection problem. Try again.';
+  }
+
+  function onNetData(m) {
+    if (!m || typeof m !== 'object') return;
+    if (net.role === 'host') {
+      if (m.t === 'in') { mallets[1].tx = m.x; mallets[1].ty = m.y; }
+      else if (m.t === 'pause') setPaused(!!m.v, true);
+      else if (m.t === 'again' && !running) startGame();
+    } else {
+      if (m.t === 's') {
+        puck.x = m.p[0]; puck.y = m.p[1];
+        mallets[0].x = m.m[0]; mallets[0].y = m.m[1];
+        score = m.sc; message = m.msg; messageT = m.mt; target = m.tg;
+        if (m.fx) for (const s of m.fx) blip(s[0], s[1], s[2], s[3], true);
+      } else if (m.t === 'start') {
+        target = m.target; score = [0, 0];
+        running = true; paused = false; hideMenu();
+        mallets[1].tx = mallets[1].x = TW / 2; mallets[1].ty = mallets[1].y = 180;
+      } else if (m.t === 'over') {
+        running = false; score = m.sc;
+        message = 'Game!'; messageT = 2;
+        setTimeout(() => showGameOver(m.w), 900);
+      } else if (m.t === 'pause') setPaused(!!m.v, true);
+    }
+  }
 
   // ---------- computer player ----------
   function cpuThink(m) {
     const b = bounds(1);
     const home = { x: TW / 2 + (puck.x - TW / 2) * 0.45, y: 150 };
     if (puck.y < TL / 2 && puck.y > 0) {
-      // attack: get behind the puck (closer to own goal) then drive through it
       const behindY = puck.y - (MR + PR) * 0.6;
       if (m.y < puck.y - 10) { m.tx = puck.x + (puck.x - TW / 2) * -0.15; m.ty = puck.y + 40; }
       else { m.tx = puck.x + (puck.x > m.x ? -1 : 1) * (MR + PR); m.ty = behindY - 40; }
@@ -324,6 +602,25 @@
   }
 
   // ---------- physics ----------
+  function moveTargetByKeys(m, i, dt) {
+    const [dx, dy] = keyDir(i);
+    if (dx || dy) {
+      if (!m.keyMode) { m.tx = m.x; m.ty = m.y; m.keyMode = true; }
+      const sp = 1500 * dt; m.tx += dx * sp; m.ty += dy * sp;
+    }
+    const b = bounds(i);
+    m.tx = clamp(m.tx, b.x0, b.x1); m.ty = clamp(m.ty, b.y0, b.y1);
+  }
+
+  // Guest: no physics, just move its own paddle and report it to the host.
+  function guestStep(dt) {
+    if (messageT > 0) messageT -= dt;
+    const m = mallets[1];
+    moveTargetByKeys(m, 1, dt);
+    m.x = m.tx; m.y = m.ty;
+    send({ t: 'in', x: Math.round(m.tx), y: Math.round(m.ty) });
+  }
+
   function step(dt) {
     if (serveT > 0) {
       serveT -= dt;
@@ -331,16 +628,10 @@
     }
     if (messageT > 0) messageT -= dt;
 
-    // mallet targets
     mallets.forEach((m, i) => {
       if (mode === 'cpu' && i === 1) cpuThink(m);
-      const [dx, dy] = keyDir(i);
-      if (dx || dy) {
-        if (!m.keyMode) { m.tx = m.x; m.ty = m.y; m.keyMode = true; }
-        const sp = 1500 * dt; m.tx += dx * sp; m.ty += dy * sp;
-      }
-      const b = bounds(i);
-      m.tx = clamp(m.tx, b.x0, b.x1); m.ty = clamp(m.ty, b.y0, b.y1);
+      if (isHost() && i === 1) { const b = bounds(1); m.tx = clamp(m.tx, b.x0, b.x1); m.ty = clamp(m.ty, b.y0, b.y1); }
+      else moveTargetByKeys(m, i, dt);
       m.px = m.x; m.py = m.y;
     });
 
@@ -350,7 +641,6 @@
       mallets.forEach((m, i) => {
         let nx = m.px + (m.tx - m.px) * (s / SUB), ny = m.py + (m.ty - m.py) * (s / SUB);
         if (mode === 'cpu' && i === 1) {
-          // limit computer speed so it is beatable
           const ddx = m.tx - m.x, ddy = m.ty - m.y, d = Math.hypot(ddx, ddy), lim = cpuMax * h;
           if (d > lim) { nx = m.x + ddx / d * lim; ny = m.y + ddy / d * lim; } else { nx = m.tx; ny = m.ty; }
         }
@@ -361,7 +651,6 @@
 
       puck.x += puck.vx * h; puck.y += puck.vy * h;
 
-      // side rails
       if (puck.x < PR) { puck.x = PR; puck.vx = Math.abs(puck.vx) * 0.9; thud(); }
       if (puck.x > TW - PR) { puck.x = TW - PR; puck.vx = -Math.abs(puck.vx) * 0.9; thud(); }
 
@@ -370,7 +659,6 @@
         if (puck.y < PR) { puck.y = PR; puck.vy = Math.abs(puck.vy) * 0.9; thud(); }
         if (puck.y > TL - PR) { puck.y = TL - PR; puck.vy = -Math.abs(puck.vy) * 0.9; thud(); }
       } else {
-        // goal posts
         for (const [gx, gy] of [[GOAL0, 0], [GOAL1, 0], [GOAL0, TL], [GOAL1, TL]]) {
           const dx = puck.x - gx, dy = puck.y - gy, d = Math.hypot(dx, dy);
           if (d < PR && d > 0) {
@@ -384,7 +672,6 @@
         if (puck.y > TL + PR) { goal(1); continue; }
       }
 
-      // mallets
       for (const m of mallets) {
         const dx = puck.x - m.x, dy = puck.y - m.y, d = Math.hypot(dx, dy), min = PR + MR;
         if (d < min) {
@@ -399,7 +686,6 @@
           }
         }
       }
-      // keep puck on the table if squeezed against a rail
       puck.x = clamp(puck.x, PR, TW - PR);
     }
     const f = Math.exp(-0.35 * dt);
@@ -407,6 +693,16 @@
   }
   let lastThud = 0;
   function thud() { const t = performance.now(); if (t - lastThud > 50) { lastThud = t; blip(180, 0.05, 0.08, 'sine'); } }
+
+  function sendState() {
+    const r = v => Math.round(v);
+    send({
+      t: 's', p: [r(puck.x), r(puck.y)], m: [r(mallets[0].x), r(mallets[0].y)],
+      sc: score, msg: message, mt: +Math.max(0, messageT).toFixed(2), tg: target,
+      fx: sfxOut.length ? sfxOut : undefined,
+    });
+    sfxOut = [];
+  }
 
   // ---------- drawing ----------
   function rr(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
@@ -416,21 +712,16 @@
     ctx.fillStyle = COL.frame; ctx.fillRect(0, 0, canvas.width, canvas.height);
     applyTransform();
 
-    // rail
     rr(-26, -26, TW + 52, TL + 52, 70); ctx.fillStyle = COL.hi; ctx.fill();
-    // ice
     rr(0, 0, TW, TL, 50); ctx.fillStyle = COL.ice; ctx.fill();
     ctx.save(); rr(0, 0, TW, TL, 50); ctx.clip();
 
-    // air holes
     ctx.fillStyle = 'rgba(15,42,61,0.07)';
     for (let y = 40; y < TL; y += 50) for (let x = 40 + ((y / 50) % 2) * 25; x < TW; x += 50) { ctx.beginPath(); ctx.arc(x, y, 3, 0, 7); ctx.fill(); }
 
-    // half tints
     ctx.fillStyle = 'rgba(255,107,61,0.06)'; ctx.fillRect(0, TL / 2, TW, TL / 2);
     ctx.fillStyle = 'rgba(42,143,224,0.06)'; ctx.fillRect(0, 0, TW, TL / 2);
 
-    // markings
     ctx.lineWidth = 8; ctx.strokeStyle = COL.mark;
     ctx.beginPath(); ctx.moveTo(0, TL / 2); ctx.lineTo(TW, TL / 2); ctx.stroke();
     ctx.beginPath(); ctx.arc(TW / 2, TL / 2, 150, 0, 7); ctx.stroke();
@@ -439,38 +730,36 @@
     ctx.strokeStyle = COL.p2; ctx.beginPath(); ctx.arc(TW / 2, 0, 200, 0, Math.PI); ctx.stroke();
     ctx.strokeStyle = COL.p1; ctx.beginPath(); ctx.arc(TW / 2, TL, 200, Math.PI, 0); ctx.stroke();
 
-    // scores, each readable from its own end
     drawScore(0); drawScore(1);
     ctx.restore();
 
-    // goals
     ctx.fillStyle = COL.frame;
     rr(GOAL0, -30, GOAL1 - GOAL0, 36, 10); ctx.fill();
     rr(GOAL0, TL - 6, GOAL1 - GOAL0, 36, 10); ctx.fill();
 
-    // puck
+    // shadows fall toward the viewer's bottom-right whichever way the table is turned
+    const sh = flipped() ? -1 : 1;
     if (puck.y > -500) {
-      ctx.fillStyle = 'rgba(15,42,61,0.18)'; ctx.beginPath(); ctx.arc(puck.x + 6, puck.y + 8, PR, 0, 7); ctx.fill();
+      ctx.fillStyle = 'rgba(15,42,61,0.18)'; ctx.beginPath(); ctx.arc(puck.x + 6 * sh, puck.y + 8 * sh, PR, 0, 7); ctx.fill();
       ctx.fillStyle = COL.ink; ctx.beginPath(); ctx.arc(puck.x, puck.y, PR, 0, 7); ctx.fill();
       ctx.strokeStyle = 'rgba(238,246,251,0.35)'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(puck.x, puck.y, PR - 10, 0, 7); ctx.stroke();
     }
-    // mallets
     mallets.forEach(m => {
       const c = COL[m.color];
-      ctx.fillStyle = 'rgba(15,42,61,0.2)'; ctx.beginPath(); ctx.arc(m.x + 7, m.y + 10, MR, 0, 7); ctx.fill();
+      ctx.fillStyle = 'rgba(15,42,61,0.2)'; ctx.beginPath(); ctx.arc(m.x + 7 * sh, m.y + 10 * sh, MR, 0, 7); ctx.fill();
       ctx.fillStyle = c; ctx.beginPath(); ctx.arc(m.x, m.y, MR, 0, 7); ctx.fill();
       ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.beginPath(); ctx.arc(m.x, m.y, MR - 14, 0, 7); ctx.fill();
       ctx.fillStyle = c; ctx.beginPath(); ctx.arc(m.x, m.y, 26, 0, 7); ctx.fill();
       ctx.strokeStyle = 'rgba(15,42,61,0.25)'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(m.x, m.y, 26, 0, 7); ctx.stroke();
     });
 
-    // banner message, shown to both ends
-    if (messageT > 0 || (!running && message === 'Game!')) {
-      const a = Math.min(1, Math.max(messageT, 0) * 3 || 1);
-      ctx.globalAlpha = a;
-      for (const side of [0, 1]) {
+    if (messageT > 0) {
+      ctx.globalAlpha = Math.min(1, messageT * 3);
+      // On a shared device the banner shows to both ends; online, each screen shows it once facing its player.
+      const sides = mode === 'online' ? [me()] : [0, 1];
+      for (const side of sides) {
         ctx.save();
-        ctx.translate(TW / 2, side === 0 ? TL * 0.62 : TL * 0.38);
+        ctx.translate(TW / 2, mode === 'online' ? TL / 2 : (side === 0 ? TL * 0.62 : TL * 0.38));
         if (side === 1) ctx.rotate(Math.PI);
         ctx.font = '400 110px Bungee, "Arial Black", sans-serif';
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -484,8 +773,11 @@
 
   function drawScore(side) {
     ctx.save();
-    ctx.translate(TW - 90, side === 0 ? TL / 2 + 90 : TL / 2 - 90);
-    if (side === 1) { ctx.translate(-(TW - 180), 0); ctx.rotate(Math.PI); }
+    // Online, both scores face this device's player; on a shared device each score faces its own end.
+    const facing = mode === 'online' ? me() : side;
+    const x = facing === 1 ? 90 : TW - 90, y = side === 0 ? TL / 2 + 90 : TL / 2 - 90;
+    ctx.translate(x, y);
+    if (facing === 1) ctx.rotate(Math.PI);
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = '400 120px Bungee, "Arial Black", sans-serif';
     ctx.fillStyle = side === 0 ? 'rgba(255,107,61,0.55)' : 'rgba(42,143,224,0.55)';
@@ -500,13 +792,20 @@
   let last = performance.now();
   function frame(t) {
     const dt = Math.min((t - last) / 1000, 1 / 30); last = t;
-    if (running && !paused) step(dt);
-    else if (!running && messageT > 0) messageT -= dt;
+    if (isGuest()) {
+      if (running && !paused) guestStep(dt);
+      else if (messageT > 0) messageT -= dt;
+    } else {
+      if (running && !paused) step(dt);
+      else if (messageT > 0) messageT -= dt;
+      if (isHost() && running) sendState();
+    }
     draw();
     requestAnimationFrame(frame);
   }
 
   window.addEventListener('resize', resize);
+  window.addEventListener('pagehide', () => { if (net.peer) try { net.peer.destroy(); } catch (_) {} });
   resize();
   resetPositions(-1);
   document.fonts && document.fonts.ready.then(draw);
